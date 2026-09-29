@@ -1,0 +1,5 @@
+[repo_check]
+exclude = ["vendor/", "static/*.js", "scripts/generated_*.py"]
+
+[repo_check.rules.FILE_TOO_LARGE]
+max_lines = 3

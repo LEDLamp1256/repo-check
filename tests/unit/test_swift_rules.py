@@ -1,0 +1,207 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from repo_check import discovery
+from repo_check.config import parse_config
+from repo_check.discovery import discover
+from repo_check.engine import run_rules
+from repo_check.errors import ConfigError
+from repo_check.languages import python as python_module
+from repo_check.languages import swift as swift_module
+from repo_check.model import Finding, Location, Severity
+from repo_check.rules import FILE_RULES
+from repo_check.rules.swift.forced_operators import SwiftForceCast, SwiftForceTry
+
+from support import write_tree
+
+SWIFT_RULE_IDS = ("SWIFT_FORCE_CAST", "SWIFT_FORCE_TRY")
+
+
+def force_try(path, line):
+    return Finding("SWIFT_FORCE_TRY", Severity.WARNING, "Force-try operator 'try!' is used.",
+                   path, Location(start_line=line), {"operator": "try!"})
+
+
+def force_cast(path, line):
+    return Finding("SWIFT_FORCE_CAST", Severity.WARNING, "Forced cast operator 'as!' is used.",
+                   path, Location(start_line=line), {"operator": "as!"})
+
+
+SOURCE = (
+    "import Foundation\n"                              # 1
+    "// try! and as! in a comment\n"                   # 2
+    "let data = try! Data(contentsOf: url)\n"          # 3
+    'let text = "as! in a string"\n'                   # 4
+    "let json = try! decode(data) as! [String: Any]\n"  # 5
+    "let safe = try? decode(data) as? Int\n"           # 6
+)
+
+
+class RuleTestCase(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def snapshot(self, files, config=None):
+        root = Path(tempfile.mkdtemp(dir=self.base))
+        write_tree(root, files)
+        return discover(root, parse_config(config or {}))
+
+    def findings(self, files, config=None, rules=FILE_RULES):
+        return list(run_rules(self.snapshot(files, config), rules))
+
+
+class MetadataAndConfigTests(unittest.TestCase):
+    def test_metadata(self):
+        for rule, rule_id in ((SwiftForceTry, "SWIFT_FORCE_TRY"),
+                              (SwiftForceCast, "SWIFT_FORCE_CAST")):
+            with self.subTest(rule=rule_id):
+                self.assertEqual(rule.metadata.id, rule_id)
+                self.assertEqual(rule.metadata.default_severity, Severity.WARNING)
+                self.assertTrue(rule.metadata.description and rule.metadata.remediation)
+
+    def test_config_accepts_only_enabled(self):
+        config = parse_config({})
+        for rule_id in SWIFT_RULE_IDS:
+            with self.subTest(rule=rule_id):
+                self.assertTrue(config.rule(rule_id).enabled)
+                self.assertEqual(dict(config.rule(rule_id).options), {})
+                with self.assertRaisesRegex(ConfigError, f"unknown key.*{rule_id}: max_lines"):
+                    parse_config({"repo_check": {"rules": {rule_id: {"max_lines": 5}}}})
+                with self.assertRaisesRegex(ConfigError, f"{rule_id}.enabled must be a boolean"):
+                    parse_config({"repo_check": {"rules": {rule_id: {"enabled": "yes"}}}})
+
+
+class ForcedOperatorRuleTests(RuleTestCase):
+    def test_exact_findings(self):
+        self.assertEqual(
+            self.findings({"Sources/App/Loader.swift": SOURCE}),
+            [
+                force_try("Sources/App/Loader.swift", 3),
+                force_cast("Sources/App/Loader.swift", 5),
+                force_try("Sources/App/Loader.swift", 5),
+            ],
+        )
+
+    def test_each_rule_reports_only_its_operator(self):
+        files = {"a.swift": SOURCE}
+        self.assertEqual(self.findings(files, rules=[SwiftForceTry()]),
+                         [force_try("a.swift", 3), force_try("a.swift", 5)])
+        self.assertEqual(self.findings(files, rules=[SwiftForceCast()]),
+                         [force_cast("a.swift", 5)])
+
+    def test_repeated_operator_on_one_line_is_reported_per_use(self):
+        self.assertEqual(
+            self.findings({"a.swift": "let x = try! a() + try! b()\n"}, rules=[SwiftForceTry()]),
+            [force_try("a.swift", 1), force_try("a.swift", 1)],
+        )
+
+    def test_source_and_test_files(self):
+        files = {
+            "Sources/App/A.swift": "let a = try! f()\n",
+            "Tests/AppTests/ATests.swift": "let b = x as! Y\n",
+            "Sources/App/BTests.swift": "let c = try! g()\n",
+        }
+        self.assertEqual(
+            self.findings(files),
+            [
+                force_try("Sources/App/A.swift", 1),
+                force_try("Sources/App/BTests.swift", 1),
+                force_cast("Tests/AppTests/ATests.swift", 1),
+            ],
+        )
+
+    def test_generated_build_and_non_swift_files_are_skipped(self):
+        files = {
+            "build/Gen.swift": "let a = try! f()\n",
+            "dist/Out.swift": "let a = try! f()\n",
+            "Sources/Generated.swift": "// @generated by tool\nlet a = try! f()\n",
+            "Sources/Mocks.swift": "// DO NOT EDIT\nlet a = x as! Y\n",
+            ".build/checkouts/Dep/Sources/Dep.swift": "let a = try! f()\n",
+            "notes.md": "try! as!\n",
+            "script.py": "x = 'try! as!'\n",
+            "Package.resolved": "try!\n",
+            "App.swiftinterface": "let a = try! f()\n",
+        }
+        self.assertEqual(self.findings(files), [])
+
+    def test_rule_disabling(self):
+        files = {"a.swift": SOURCE}
+        only_cast = {"repo_check": {"rules": {"SWIFT_FORCE_TRY": {"enabled": False}}}}
+        self.assertEqual(
+            [f.rule_id for f in self.findings(files, only_cast)], ["SWIFT_FORCE_CAST"]
+        )
+        none = {"repo_check": {"rules": {rule: {"enabled": False} for rule in SWIFT_RULE_IDS}}}
+        self.assertEqual(self.findings(files, none), [])
+
+    def test_excluded_files_are_skipped(self):
+        config = {"repo_check": {"exclude": ["Vendor/"]}}
+        self.assertEqual(self.findings({"Vendor/Lib.swift": SOURCE}, config), [])
+
+    def test_deterministic_ordering_across_files(self):
+        files = {
+            "b.swift": "let a = x as! Y\n",
+            "a/z.swift": "let a = try! f()\n",
+            "a.swift": "let a = f() as! G\nlet b = try! h()\n",
+        }
+        first = self.findings(files)
+        self.assertEqual(
+            [(f.path, f.location.start_line, f.rule_id) for f in first],
+            [
+                ("a.swift", 1, "SWIFT_FORCE_CAST"),
+                ("a.swift", 2, "SWIFT_FORCE_TRY"),
+                ("a/z.swift", 1, "SWIFT_FORCE_TRY"),
+                ("b.swift", 1, "SWIFT_FORCE_CAST"),
+            ],
+        )
+        self.assertEqual(first, self.findings(files))
+
+
+class ExtractOnceTests(RuleTestCase):
+    files = {
+        "Sources/A.swift": "let a = try! f() as! G\n",
+        "Tests/BTests.swift": "let b = try! h()\n",
+        "build/C.swift": "let c = try! i()\n",
+        "d.py": "def f(x=[]):\n    pass\n",
+        "README.md": "# not swift\n",
+    }
+
+    def run_with_spies(self, config=None):
+        snapshot = self.snapshot(self.files, config)
+        with mock.patch.object(
+            swift_module, "analyze_swift", wraps=swift_module.analyze_swift
+        ) as swift_spy, mock.patch.object(
+            python_module, "parse_module", wraps=python_module.parse_module
+        ) as python_spy, mock.patch(
+            "repo_check.languages.facts.read_text_lines",
+            wraps=discovery.read_text_lines,
+        ) as read_spy:
+            findings = run_rules(snapshot, FILE_RULES)
+        return findings, swift_spy, python_spy, read_spy
+
+    def test_each_swift_file_extracted_once_across_both_rules(self):
+        findings, swift_spy, python_spy, read_spy = self.run_with_spies()
+        self.assertEqual(swift_spy.call_count, 2)  # Sources/A.swift, Tests/BTests.swift
+        self.assertEqual(python_spy.call_count, 1)  # Python parse-once still holds
+        read_paths = sorted(call.args[0].relative_path for call in read_spy.call_args_list)
+        self.assertEqual(read_paths, ["Sources/A.swift", "Tests/BTests.swift", "d.py"])
+        self.assertEqual(
+            sorted(f.rule_id for f in findings),
+            ["PYTHON_MUTABLE_DEFAULT", "SWIFT_FORCE_CAST", "SWIFT_FORCE_TRY", "SWIFT_FORCE_TRY"],
+        )
+
+    def test_no_swift_extraction_when_swift_rules_disabled(self):
+        config = {"repo_check": {"rules": {rule: {"enabled": False} for rule in SWIFT_RULE_IDS}}}
+        findings, swift_spy, python_spy, _ = self.run_with_spies(config)
+        self.assertEqual(swift_spy.call_count, 0)
+        self.assertEqual(python_spy.call_count, 1)
+        self.assertEqual([f.rule_id for f in findings], ["PYTHON_MUTABLE_DEFAULT"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,3 @@
+[repo_check.rules.FILE_TOO_LARGE]
+enabled = true
+max_lines = 5

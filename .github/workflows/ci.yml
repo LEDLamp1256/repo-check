@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-linux:
+    name: Tests (Ubuntu, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run test suite
+        run: PYTHONPATH=src python -m unittest discover -s tests
+
+  test-macos:
+    name: Tests (macOS, Python 3.14)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Run test suite
+        run: PYTHONPATH=src python -m unittest discover -s tests
+      - name: Case-insensitive --compare regression must run, not skip
+        working-directory: tests
+        run: |
+          test=unit.test_git_compare.ScopingTests.test_root_in_different_letter_case_on_case_insensitive_file_system
+          PYTHONPATH=../src python -m unittest -v "$test" 2>&1 | tee result.txt
+          grep -q "test_root_in_different_letter_case_on_case_insensitive_file_system.* ok$" result.txt
+
+  distribution:
+    name: Build and install distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Set package version
+        run: |
+          version=$(PYTHONPATH=src python -c 'import repo_check; print(repo_check.__version__)')
+          printf 'PACKAGE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+      - name: Build wheel and sdist
+        run: |
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install --disable-pip-version-check build twine
+          "$RUNNER_TEMP/tools/bin/python" -m build --outdir "$RUNNER_TEMP/dist" .
+          ls -l "$RUNNER_TEMP/dist"
+      - name: Validate package metadata
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" -m twine check --strict "$RUNNER_TEMP"/dist/*
+      - name: Check sdist includes CHANGELOG.md
+        run: |
+          tar -tzf "$RUNNER_TEMP/dist/repo_check-${PACKAGE_VERSION}.tar.gz" | grep -qx "repo_check-${PACKAGE_VERSION}/CHANGELOG.md"
+      - name: Install wheel and sdist into clean environments and smoke-test
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          for artifact in "dist/repo_check-${PACKAGE_VERSION}-py3-none-any.whl" "dist/repo_check-${PACKAGE_VERSION}.tar.gz"; do
+            echo "::group::$artifact"
+            rm -rf venv work
+            python -m venv venv
+            venv/bin/python -m pip install --disable-pip-version-check "$artifact"
+            mkdir work && cd work
+            test "$(../venv/bin/repo-check --version)" = "repo-check ${PACKAGE_VERSION}"
+            test "$(../venv/bin/python -m repo_check --version)" = "repo-check ${PACKAGE_VERSION}"
+            ../venv/bin/repo-check --help > /dev/null
+            # Installed code, not the checkout, and no runtime dependencies.
+            ../venv/bin/python - <<'PY'
+          import importlib.metadata as md
+          import os
+          import repo_check
+          assert os.environ["RUNNER_TEMP"] in repo_check.__file__, repo_check.__file__
+          assert md.version("repo-check") == os.environ["PACKAGE_VERSION"]
+          assert md.requires("repo-check") is None, md.requires("repo-check")
+          names = sorted(d.metadata["Name"] for d in md.distributions())
+          extra = [n for n in names if n not in ("pip", "setuptools", "repo-check")]
+          assert not extra, extra
+          PY
+            # Smoke analysis: clean (exit 0), warning with --fail-on warning
+            # (exit 1), invalid path (exit 2), and JSON schema_version 1.
+            mkdir -p clean/src warn/src
+            printf 'def f(x=None):\n    return x\n' > clean/src/app.py
+            printf 'def f(x=[]):\n    return x\n' > warn/src/app.py
+            test "$(../venv/bin/repo-check clean)" = "No findings."
+            status=0; ../venv/bin/repo-check warn --fail-on warning || status=$?
+            test "$status" = 1
+            status=0; ../venv/bin/repo-check does-not-exist || status=$?
+            test "$status" = 2
+            ../venv/bin/repo-check warn --format json > out.json
+            ../venv/bin/python -c "import json; d = json.load(open('out.json')); assert d['schema_version'] == 1, d; assert [f['rule_id'] for f in d['findings']] == ['PYTHON_MUTABLE_DEFAULT'], d"
+            cd ..
+            echo "::endgroup::"
+          done
