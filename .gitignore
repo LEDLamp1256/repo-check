@@ -3,3 +3,11 @@ __pycache__/
 build/
 dist/
 .venv/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.pem
+*.key
+*.p12
+*.pfx
