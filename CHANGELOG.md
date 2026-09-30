@@ -1,25 +1,14 @@
 # Changelog
 
-## 0.2.0 - Unreleased
-
-### Analysis
-
-- Added explicit `--history N` support for bounded, deterministic local
-  non-merge Git history collection.
-- Added the `FREQUENTLY_CHANGED_FILE` history rule (info, runs only with
-  `--history`): reports current source files touched by at least 10 and at
-  least 10% of the scanned commits, once at least 50 commits were scanned.
-  All three thresholds are configurable.
-
 ## 0.1.0 - 2026-09-29
 
-First release of RepoCheck, a deterministic code and repository health
+First public release of RepoCheck, a deterministic code and repository health
 analyzer. It runs locally, needs no network access or cloud service, and has
 no third-party runtime dependencies. It requires Python 3.11 or newer.
 
 ### Analysis
 
-- Thirteen available rules with stable IDs:
+- Fourteen available rules with stable IDs:
   - Files and repository: `FILE_TOO_LARGE`, `TODO_COMMENT`,
     `BROKEN_LOCAL_DOC_LINK` (relative links in Markdown; opt-in, see below),
     and `TRACKED_BUILD_ARTIFACT` (build outputs tracked by Git).
@@ -31,11 +20,15 @@ no third-party runtime dependencies. It requires Python 3.11 or newer.
   - Branch comparison, with `--compare REF`: `LARGE_CHANGESET`,
     `PRODUCTION_CHANGE_WITHOUT_TEST_CHANGE`, and
     `SENSITIVE_PROJECT_FILE_CHANGED`.
+  - History, with `--history N`: `FREQUENTLY_CHANGED_FILE` (info), which
+    reports current source files touched by at least 10 and at least 10% of
+    the scanned commits, once at least 50 commits were scanned. All three
+    thresholds are configurable.
 - Rules favor precision: a missed low-value finding is preferred over a
   recurring false positive.
 - All rules are enabled by default except `BROKEN_LOCAL_DOC_LINK`, which is
   opt-in (`enabled = true` in its rule table). It resolves links as
-  filesystem paths, which is accurate for plain Markdown but produced
+  filesystem paths, which is accurate for plain Markdown but produces
   frequent false positives on documentation built by static-site generators,
   whose link semantics differ.
 - Generic `build/` and `dist/` directories are treated as build output only
@@ -45,6 +38,8 @@ no third-party runtime dependencies. It requires Python 3.11 or newer.
   artifacts at any depth.
 - `--compare REF` analyzes the changes committed on the current branch since
   its merge base with a local ref.
+- `--history N` collects at most `N` local non-merge commits reachable from
+  `HEAD`, in a pinned, deterministic order, for the history rules.
 
 ### Configuration and output
 
@@ -57,8 +52,8 @@ no third-party runtime dependencies. It requires Python 3.11 or newer.
 
 ### Git
 
-- Git is optional except for `--compare`. RepoCheck reads only local state
-  and never fetches.
+- Git is optional except for `--compare` and `--history`. RepoCheck reads
+  only local state and never fetches.
 - Git runs without a shell, with a timeout. Repository-redirecting
   environment variables, `core.fsmonitor`, `git replace` overlays, and
   submodule-ignore settings cannot change the results.
@@ -67,6 +62,8 @@ no third-party runtime dependencies. It requires Python 3.11 or newer.
 
 - Only committed changes are compared; staged and unstaged changes are not
   analyzed.
+- `--history` does not follow renames: a renamed file counts as its old path
+  and its new path.
 - The Swift scanner is lexical, not a parser. It misses some uses (for
   example in string interpolation or near ambiguous `/`) to avoid false
   positives, and it scans inactive `#if` branches.

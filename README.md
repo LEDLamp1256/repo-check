@@ -9,7 +9,7 @@ available), output and finding order are identical from run to run. Results
 from Git-based rules depend on the local Git state: they differ if files are
 tracked differently, and are empty when Git is unavailable.
 
-Development version: 0.2.0.dev0. The latest tagged release is 0.1.0.
+Current version: 0.1.0.
 
 Fourteen rules are available: `FILE_TOO_LARGE`,
 `TODO_COMMENT`, `BROKEN_LOCAL_DOC_LINK`, `TRACKED_BUILD_ARTIFACT`, four
@@ -46,7 +46,7 @@ repository into a virtual environment:
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install .
-repo-check --version          # prints: repo-check 0.2.0.dev0
+repo-check --version          # prints: repo-check 0.1.0
 ```
 
 This installs the `repo-check` command; `python -m repo_check` is
@@ -56,8 +56,8 @@ To install a built artifact instead, build a wheel and install that file:
 
 ```bash
 python -m pip install build
-python -m build                # writes dist/repo_check-0.2.0.dev0-py3-none-any.whl and a .tar.gz
-python -m pip install dist/repo_check-0.2.0.dev0-py3-none-any.whl
+python -m build                # writes dist/repo_check-0.1.0-py3-none-any.whl and a .tar.gz
+python -m pip install dist/repo_check-0.1.0-py3-none-any.whl
 ```
 
 ### Development install
@@ -674,3 +674,17 @@ python -m unittest discover -s tests
 ```
 
 If the package is not installed, prefix the command with `PYTHONPATH=src`.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+project principles, development setup, and pull request process.
+
+## Security
+
+Please do not report security vulnerabilities in public issues. See
+[SECURITY.md](SECURITY.md) for how to report them privately.
+
+## License
+
+RepoCheck is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
